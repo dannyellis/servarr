@@ -1,0 +1,73 @@
+---
+services:
+  gluetun:
+    image: qmcgaw/gluetun # Official Gluetun image
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN # Required for managing network interfaces (VPN)
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      # Ports for qBittorrent - these are exposed on the Gluetun container
+      # as qBittorrent will use Gluetun's network stack.
+      - ${QBIT_WEBUI_PORT}:${QBIT_WEBUI_PORT} # qBittorrent Web UI (default port)
+      - ${TORRENT_PORT}:${TORRENT_PORT} # qBittorrent incoming connections (TCP)
+      - ${TORRENT_PORT}:${TORRENT_PORT}/udp # qBittorrent incoming connections (UDP for DHT, PeX, LSD)
+    volumes:
+      - ./gluetun/data:/gluetun # Persistent storage for Gluetun configuration and data
+    environment:
+      # ---------- REQUIRED: VPN Service Provider Configuration ----------
+      - VPN_SERVICE_PROVIDER=airvpn # Changed to AirVPN
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+      - WIREGUARD_PRESHARED_KEY=${WIREGUARD_PRESHARED_KEY}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES}
+      - SERVER_COUNTRIES=${WIREGUARD_COUNTRIES}
+
+      # ---------- Firewall Configuration ----------
+      # These ports are opened on the VPN interface for qBittorrent.
+      # Ensure these match the ports qBittorrent is configured to use.
+      - FIREWALL_VPN_INPUT_PORTS=${TORRENT_PORT},${QBIT_WEBUI_PORT}
+      - FIREWALL_OUTBOUND_SUBNETS=192.168.0.0/16,172.16.0.0/12
+
+      # ---------- Other Settings ----------
+      - TZ=${TIMEZONE} # Your timezone, e.g., America/New_York, Europe/London
+      # Set to "on" to kill the internet connection if the VPN drops.
+      # Set to "off" to allow internet connection if VPN drops (not recommended for torrenting).
+      - DOT_HEALTH_FAILURE_EXIT=yes # More modern way to ensure killswitch functionality.
+
+    restart: unless-stopped
+
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest # linuxserver.io qBittorrent image
+    container_name: qbittorrent
+    environment:
+      - PUID=1000 # User ID, change if necessary
+      - PGID=1000 # Group ID, change if necessary
+      - TZ=${TIMEZONE} # Your timezone, ensure it matches Gluetun's TZ
+      - WEBUI_PORT=${QBIT_WEBUI_PORT} # qBittorrent Web UI port (must match port exposed by Gluetun)
+      - TORRENTING_PORT=${TORRENT_PORT}
+      - DOCKER_MODS=ghcr.io/vuetorrent/vuetorrent-lsio-mod:latest
+    volumes:
+      - ./qbittorrent/config:/config # Persistent storage for qBittorrent configuration
+      - /mnt/data:/data # Persistent storage for downloaded files
+    network_mode: "service:gluetun" # CRUCIAL: Routes all qBittorrent traffic through the Gluetun container
+    depends_on:
+      gluetun:
+        condition: service_healthy # Optional: wait for gluetun to be healthy (if gluetun supports healthchecks)
+        # If your gluetun image doesn't have a healthcheck, you might need to remove the condition
+        # or rely on simple `depends_on: [gluetun]` and potentially add a startup delay if issues arise.
+    restart: unless-stopped
+
+  cross-seed:
+    image: ghcr.io/cross-seed/cross-seed:6
+    container_name: cross-seed-movies
+    user: 1000:1000 # this must match your torrent client (cross-seed does not support using PGID and PUID)
+    ports:
+      - "2468:2468"
+    volumes:
+      - ./cross-seed/config:/config
+      # You will need at least one extra volume for your media drive if using https://www.cross-seed.org/docs/tutorials/linking
+    command: daemon
+    restart: unless-stopped
